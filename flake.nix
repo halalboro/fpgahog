@@ -56,9 +56,13 @@
         ];
       };
       packages.default = rustPlatform.buildRustPackage {
-        name = "hosthog";
+        name = "fpgahog";
         src = self;
         buildInputs = [];
+        # fpgahog is a drop-in replacement for hosthog, so install it under both names.
+        postInstall = ''
+          ln -s fpgahog $out/bin/hosthog
+        '';
         cargoLock = {
           lockFile = ./Cargo.lock;
           outputHashes = {

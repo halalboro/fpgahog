@@ -26,11 +26,8 @@ async fn list_units<'a>(
     manager: &zbus_systemd::systemd1::ManagerProxy<'a>,
     states: Vec<String>,
     match_globs: Vec<String>,
-) -> Vec<Unit> {
-    let units = manager
-        .list_units_by_patterns(states, match_globs)
-        .await
-        .expect("Can't list systemd units");
+) -> ExResult<Vec<Unit>> {
+    let units = manager.list_units_by_patterns(states, match_globs).await?;
     // convert unit tuple to struct
     let units = units.into_iter().map(
         |(
@@ -59,139 +56,103 @@ async fn list_units<'a>(
             }
         },
     );
-    return units.collect();
+    Ok(units.collect())
 }
 
-pub fn disable_resource(state: &mut diskstate::DiskState) {
+/// Stop the units a hog pauses. Failures are returned, never fatal: by the time this runs the
+/// host is already hogged, and dying here would leave that half-recorded.
+pub fn disable_resource(state: &mut diskstate::DiskState) -> Result<(), String> {
     println!("systemd_units: disable systemd services");
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let ret = rt.block_on(disable_units(state));
-    if let Err(e) = ret {
-        eprintln!("Error: {}", e);
-        std::process::exit(1);
-    }
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|e| format!("cannot start async runtime: {}", e))?;
+    runtime.block_on(disable_units(state)).map_err(|e| e.to_string())
 }
 
-pub fn enable_resource(state: &mut diskstate::DiskState) {
+/// Start the units a hog paused. Units that fail stay recorded, so a later release retries them.
+pub fn enable_resource(state: &mut diskstate::DiskState) -> Result<(), String> {
     println!("systemd_units: enable systemd services");
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let ret = rt.block_on(enable_units(state));
-    if let Err(e) = ret {
-        eprintln!("Error: {}", e);
-        std::process::exit(1);
-    }
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|e| format!("cannot start async runtime: {}", e))?;
+    runtime.block_on(enable_units(state)).map_err(|e| e.to_string())
 }
 
 async fn disable_units(state: &mut diskstate::DiskState) -> ExResult<()> {
-    let conn = zbus::Connection::system().await.expect("Can't connect");
-    let manager = zbus_systemd::systemd1::ManagerProxy::new(&conn)
+    let conn = zbus::Connection::system()
         .await
-        .expect("Can't get systemd manager");
+        .map_err(|e| format!("cannot reach systemd over the system bus: {}", e))?;
+    let manager = zbus_systemd::systemd1::ManagerProxy::new(&conn).await?;
 
-    // list units
-    let states = vec![
-        "active".to_string(),
-        // "inactive".to_string()
-    ];
+    let states = vec!["active".to_string()];
     let mut units = vec![];
     if DISABLE_TIMERS {
-        let names = vec!["*.timer".to_string()];
-        units.append(&mut list_units(&manager, states.clone(), names.clone()).await);
+        units.append(&mut list_units(&manager, states.clone(), vec!["*.timer".to_string()]).await?);
     }
     for unit in DISABLE_UNITS {
-        let names = vec![unit.to_string()];
-        units.append(&mut list_units(&manager, states.clone(), names).await);
+        units.append(&mut list_units(&manager, states.clone(), vec![unit.to_string()]).await?);
     }
 
+    let mut failed = vec![];
     for unit in units {
-        disable_unit(state, &manager, &unit).await;
-        // println!(" - {} ({})", unit.name, unit.active_state);
-
-        // // print timer details
-        // let unit_proxy  = zbus_systemd::systemd1::TimerProxy::new(&conn, unit.unit_path)
-        //     .await
-        //     .expect("Can't get systemd unit");
-        // let calendar = unit_proxy.timers_calendar().await.expect("Cant get calendar of timer");
-        // for (timer_base, crontab_spec, elaps_timestamp) in calendar {
-        //     println!("   - {}", crontab_spec);
-        // }
-
-        // manager.stop_unit(unit.name, "fail".to_string()); // or maybe "replace"?
+        if let Err(err) = disable_unit(state, &manager, &unit).await {
+            println!("WARN: {}", err);
+            failed.push(unit.name.clone());
+        }
     }
-    return Ok(());
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("could not stop {}", failed.join(", ")).into())
+    }
 }
 
 async fn disable_unit<'a>(
     state: &mut diskstate::DiskState,
     manager: &zbus_systemd::systemd1::ManagerProxy<'a>,
     unit: &Unit,
-) {
+) -> Result<(), String> {
     println!("disabling {}", unit.name);
-    match manager
-        .stop_unit(unit.name.clone(), "fail".to_string())
-        .await
-    {
-        // or maybe "replace"?
+    match manager.stop_unit(unit.name.clone(), "fail".to_string()).await {
         Err(zbus::Error::MethodError(name, _option, _message))
             if name == "org.freedesktop.DBus.Error.AccessDenied" =>
         {
-            println!(
-                "WARN: insuficient permissions to start {}. Try to run this program as root.",
-                unit.name
-            );
+            Err(format!("insufficient permissions to stop {}; run as root", unit.name))
         }
-        Err(e) => {
-            panic!("Can't start systemd unit: {}", e);
-        }
+        Err(e) => Err(format!("cannot stop {}: {}", unit.name, e)),
         Ok(_) => {
             if !state.disabled_systemd_units.contains(&unit.name) {
                 state.disabled_systemd_units.push(unit.name.clone());
             }
+            Ok(())
         }
-    };
+    }
 }
 
 async fn enable_units(state: &mut diskstate::DiskState) -> ExResult<()> {
-    let conn = zbus::Connection::system().await.expect("Can't connect");
-    let manager = zbus_systemd::systemd1::ManagerProxy::new(&conn)
+    let conn = zbus::Connection::system()
         .await
-        .expect("Can't get systemd manager");
+        .map_err(|e| format!("cannot reach systemd over the system bus: {}", e))?;
+    let manager = zbus_systemd::systemd1::ManagerProxy::new(&conn).await?;
 
-    let disabled_timers_copy: Vec<String> = state
-        .disabled_systemd_units
-        .iter()
-        .map(|t| t.clone())
-        .collect();
-    for timer_name in disabled_timers_copy {
-        println!("enabling {}", timer_name);
-        match manager
-            .start_unit(timer_name.clone(), "fail".to_string())
-            .await
-        {
-            // or maybe "replace"?
+    let mut failed = vec![];
+    for unit_name in state.disabled_systemd_units.clone() {
+        println!("enabling {}", unit_name);
+        match manager.start_unit(unit_name.clone(), "fail".to_string()).await {
             Err(zbus::Error::MethodError(name, _option, _message))
                 if name == "org.freedesktop.DBus.Error.AccessDenied" =>
             {
-                println!(
-                    "WARN: insuficient permissions to start {}. Try to run this program as root.",
-                    timer_name
-                );
+                println!("WARN: insufficient permissions to start {}; run as root", unit_name);
+                failed.push(unit_name);
             }
             Err(e) => {
-                panic!("Can't start systemd unit: {}", e);
+                println!("WARN: cannot start {}: {}", unit_name, e);
+                failed.push(unit_name);
             }
-            Ok(_) => {
-                // let foo = state.disabled_systemd_timers.iter().filter_map(|t| {
-                //     if *t == timer_name {
-                //         None
-                //     } else {
-                //         Some(t.clone())
-                //     }
-                // }).collect();
-                // state.disabled_systemd_timers = foo;
-                state.disabled_systemd_units.retain(|t| *t != timer_name);
-            }
-        };
+            Ok(_) => state.disabled_systemd_units.retain(|t| *t != unit_name),
+        }
     }
-    return Ok(());
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("could not start {}", failed.join(", ")).into())
+    }
 }

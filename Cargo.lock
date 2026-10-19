@@ -564,6 +564,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
+name = "fpgahog"
+version = "0.3.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "dateparser",
+ "duration-str",
+ "libc",
+ "netstat",
+ "nix 0.27.1",
+ "once_cell",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "zbus_systemd",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -721,25 +740,6 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
-
-[[package]]
-name = "hosthog"
-version = "0.3.0"
-dependencies = [
- "chrono",
- "clap",
- "dateparser",
- "duration-str",
- "libc",
- "netstat",
- "nix 0.27.1",
- "once_cell",
- "serde",
- "serde_json",
- "serde_yaml",
- "tokio",
- "zbus_systemd",
-]
 
 [[package]]
 name = "iana-time-zone"

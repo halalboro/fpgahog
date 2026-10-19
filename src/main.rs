@@ -10,6 +10,7 @@ mod users;
 mod claims;
 mod util;
 mod systemd_units;
+mod reservation;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -38,7 +39,7 @@ pub struct ClaimCommand {
     /// `[RESOURCE] TIMEOUT [COMMENT]...`. RESOURCE is `host` or an FPGA alias from `list`,
     /// comma separated for several (`host,u280`); leave it out to claim the host, exactly like
     /// hosthog's `claim TIMEOUT [COMMENT]...`. TIMEOUT is a duration (`15min`, `4h`) or a date,
-    /// after which the claim is removed.
+    /// after which the claim is removed. Use `never` for explicit release only.
     #[arg(required = true, num_args = 1.., value_name = "[RESOURCE] TIMEOUT [COMMENT]")]
     pub args: Vec<String>,
     /// Optional timeout: will not remove the claim, but will be shown in the status
@@ -137,6 +138,11 @@ enum Commands {
         resource: Resource,
     },
     #[command(hide(true))]
+    /// Atomic deployment reservation operations (no forced takeover).
+    Reservation {
+        #[command(subcommand)]
+        action: reservation::Action,
+    },
     // Internal command used to trigger updating the list of claims and hogs
     Maintenance {},
 }
@@ -145,7 +151,8 @@ enum Commands {
 /// of failing at the very end after half their work: a claim used to queue its `at` job first.
 fn needs_root(command: &Commands) -> bool {
     match command {
-        Commands::Claim { .. }
+        Commands::Reservation { .. }
+        | Commands::Claim { .. }
         | Commands::Release { .. }
         | Commands::Hog { .. }
         | Commands::Disable { .. }
@@ -231,7 +238,7 @@ fn claim_summary(state: &diskstate::DiskState, alias: &str) -> String {
             "{} ({}), {} left",
             claim.user,
             if claim.exclusive { "exclusive" } else { "shared" },
-            util::format_timeout_abs(claim.timeout)
+            claim.remaining()
         ),
         None => String::from("free"),
     }
@@ -329,7 +336,7 @@ fn show_status(_cmd: StatusCommand, state: &diskstate::DiskState) {
             // show the soft timeout instead of the hard one when there is one
             let remaining = match claim.soft_timeout {
                 Some(soft_timeout) => format!("{} (soft)", util::format_timeout(soft_timeout - now)),
-                None => util::format_timeout(claim.timeout - now),
+                None => claim.timeout.map(|t| util::format_timeout(t - now)).unwrap_or_else(|| "until explicitly released".into()),
             };
             let comment = match claim.exclusive {
                 true => format!("(exclusive) {}", claim.comment),
@@ -587,7 +594,22 @@ fn main() {
         std::process::exit(1);
     }
 
+    if users::is_root() && _original_state.state_version != state.state_version {
+        // Replace callbacks to an older binary when writing the new state schema.
+        do_maintenance(&mut state);
+    }
+
     match cli.command {
+        Some(Commands::Reservation { action }) => {
+            do_maintenance(&mut state);
+            // Persist inside the operation before acknowledging success.
+            let result = reservation::run(action, &mut state);
+            diskstate::store(&state);
+            match result {
+                Ok(message) => println!("{}", message),
+                Err(message) => { eprintln!("{}", message); std::process::exit(1); }
+            }
+        }
         Some(Commands::Status { status }) if !status.verbose => {
             show_status(status, &state);
         }

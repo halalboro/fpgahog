@@ -499,7 +499,7 @@ mod tests {
     fn claim(user: &str, resources: &[&str], exclusive: bool) -> Claim {
         Claim {
             id: 1,
-            timeout: Local::now() + chrono::Duration::hours(1),
+            timeout: Some(Local::now() + chrono::Duration::hours(1)),
             soft_timeout: None,
             exclusive,
             user: user.into(),

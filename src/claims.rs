@@ -16,7 +16,7 @@ fn next_minute(timeout: DateTime<Local>) -> DateTime<Local> {
     return timeout + Duration::seconds(61);
 }
 
-fn schedule_maintenance(timeout: DateTime<Local>) {
+pub(crate) fn schedule_maintenance(timeout: DateTime<Local>) {
     let timeout = next_minute(timeout);
     let binary = util::prog_for_later();
     if util::is_build_output(std::path::Path::new(&binary)) {
@@ -26,7 +26,10 @@ fn schedule_maintenance(timeout: DateTime<Local>) {
         );
     }
     // Log to the journal instead of letting at mail the output of every re-check.
-    let future_command = format!("{} maintenance 2>&1 | logger -t fpgahog", binary);
+    // Preserve the Nix runtime utilities for subsequent rechecks launched by at.
+    let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+    let future_command = format!("export PATH={}; {} maintenance 2>&1 | logger -t fpgahog",
+        quote(&std::env::var("PATH").unwrap_or_default()), quote(&binary));
     let future = format!("{}", timeout.format("%H:%M %Y-%m-%d"));
     println!("Scheduling job {} at {}", future_command, future);
     match Command::new("at").arg(future).stdin(Stdio::piped()).spawn() {
@@ -52,7 +55,7 @@ fn schedule_maintenance(timeout: DateTime<Local>) {
 pub struct Conflict {
     pub resource: ResourceId,
     pub user: String,
-    pub until: DateTime<Local>,
+    pub until: Option<DateTime<Local>>,
     pub exclusive: bool,
 }
 
@@ -82,7 +85,7 @@ pub fn find_conflicts(
     conflicts
 }
 
-fn report_conflicts(conflicts: &[Conflict]) {
+pub(crate) fn report_conflicts(conflicts: &[Conflict]) {
     eprintln!("Claim refused. Already claimed by someone else:");
     for conflict in conflicts {
         eprintln!(
@@ -90,7 +93,7 @@ fn report_conflicts(conflicts: &[Conflict]) {
             conflict.resource.to_string(),
             conflict.user,
             if conflict.exclusive { "exclusive" } else { "shared" },
-            util::format_timeout_abs(conflict.until),
+            conflict.until.map(util::format_timeout_abs).unwrap_or_else(|| "until explicitly released".into()),
         );
     }
 }
@@ -116,7 +119,7 @@ fn guards_a_board(state: &DiskState, now: DateTime<Local>) -> bool {
     state
         .claims
         .iter()
-        .filter(|c| c.exclusive && c.timeout > now)
+        .filter(|c| c.exclusive && c.active_at(now))
         .any(|c| {
             c.resources.iter().filter_map(|r| r.alias()).any(|alias| {
                 state.settings.fpga(alias).is_some_and(|spec| !spec.devices.is_empty() || !spec.cables.is_empty())
@@ -147,7 +150,7 @@ pub struct CheckOutcome {
 
 pub fn check_access(state: &DiskState, me: &str, requested: &[ResourceId], now: DateTime<Local>) -> CheckOutcome {
     let mut outcome = CheckOutcome { blocking: vec![], sharing: vec![] };
-    for claim in state.claims.iter().filter(|c| c.user != me && c.timeout > now) {
+    for claim in state.claims.iter().filter(|c| c.user != me && c.active_at(now)) {
         if !requested.iter().any(|resource| claim.covers(resource)) {
             continue;
         }
@@ -180,7 +183,7 @@ pub fn do_check(text: &str, state: &DiskState) -> i32 {
             "note: {} is also in use by {} (shared, {} left){}",
             claim.resources_str(),
             claim.user,
-            util::format_timeout_abs(claim.timeout),
+            claim.remaining(),
             describe(claim)
         );
     }
@@ -189,7 +192,7 @@ pub fn do_check(text: &str, state: &DiskState) -> i32 {
             "{} is claimed exclusively by {} for another {}{}",
             claim.resources_str(),
             claim.user,
-            util::format_timeout_abs(claim.timeout),
+            claim.remaining(),
             describe(claim)
         );
     }
@@ -279,7 +282,7 @@ pub fn do_claim(cmd: &ClaimCommand, state: &mut DiskState) {
 
     let mut known = vec![HOST_RESOURCE.to_string()];
     known.extend(state.settings.aliases());
-    let args = match split_claim_args(&cmd.args, &known, |text| try_parse_timeout(text).is_ok()) {
+    let args = match split_claim_args(&cmd.args, &known, |text| text == "never" || try_parse_timeout(text).is_ok()) {
         Ok(args) => args,
         Err(err) => {
             eprintln!("{}", err);
@@ -329,7 +332,7 @@ pub fn do_claim(cmd: &ClaimCommand, state: &mut DiskState) {
         }
     }
 
-    let timeout = parse_timeout(&args.timeout);
+    let timeout = if args.timeout == "never" { None } else { Some(parse_timeout(&args.timeout)) };
     let soft_timeout = match &cmd.soft_timeout {
         Some(soft_timeout) => Some(parse_timeout(soft_timeout)),
         None => None,
@@ -349,7 +352,7 @@ pub fn do_claim(cmd: &ClaimCommand, state: &mut DiskState) {
     println!(
         "Claimed {} until {} ({}){}",
         claim.resources_str(),
-        claim.timeout.format("%Y-%m-%d %H:%M"),
+        claim.timeout.map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "explicit release".into()),
         if exclusive { "exclusive" } else { "shared" },
         if claim.comment.is_empty() { String::new() } else { format!(": {}", claim.comment) },
     );
@@ -363,12 +366,12 @@ pub fn do_claim(cmd: &ClaimCommand, state: &mut DiskState) {
         cable::evict_held(state, &held);
         fpga::sync_locks(state);
     }
-    schedule_maintenance(timeout);
+    if let Some(timeout) = timeout { schedule_maintenance(timeout); }
 }
 
 /// Refuse an exclusive claim on a board we have no way to protect, unless forced. Recording
 /// a claim that silently enforces nothing is worse than saying so.
-fn check_enforceable(specs: &[crate::diskstate::FpgaSpec], force: bool) -> bool {
+pub(crate) fn check_enforceable(specs: &[crate::diskstate::FpgaSpec], force: bool) -> bool {
     let unenforceable: Vec<&crate::diskstate::FpgaSpec> =
         specs.iter().filter(|s| s.devices.is_empty() && s.cables.is_empty()).collect();
     if unenforceable.is_empty() {
@@ -393,7 +396,7 @@ fn check_enforceable(specs: &[crate::diskstate::FpgaSpec], force: bool) -> bool 
 }
 
 /// Refuse to take a board out from under a running job, unless forced.
-fn check_free(specs: &[crate::diskstate::FpgaSpec], me: &str, force: bool) -> bool {
+pub(crate) fn check_free(specs: &[crate::diskstate::FpgaSpec], me: &str, force: bool) -> bool {
     let my_uid = util::get_uid(me);
     let mut blocked = false;
     for spec in specs {
@@ -439,7 +442,7 @@ mod tests {
     fn claim_of(user: &str, resources: &[&str], exclusive: bool) -> Claim {
         Claim {
             id: 1,
-            timeout: Local::now() + ChronoDuration::hours(1),
+            timeout: Some(Local::now() + ChronoDuration::hours(1)),
             soft_timeout: None,
             exclusive,
             user: user.to_string(),
@@ -595,7 +598,7 @@ mod recheck_and_check_tests {
     fn claim(user: &str, resources: &str, exclusive: bool, left: Span) -> Claim {
         Claim {
             id: 0,
-            timeout: Local::now() + left,
+            timeout: Some(Local::now() + left),
             soft_timeout: None,
             exclusive,
             user: user.into(),
@@ -723,7 +726,7 @@ mod cable_enforcement_tests {
         state.settings.fpgas = vec![board_with_only_a_cable()];
         state.claims = vec![Claim {
             id: 1,
-            timeout: Local::now() + Duration::hours(1),
+            timeout: Some(Local::now() + Duration::hours(1)),
             soft_timeout: None,
             exclusive: true,
             user: "me".into(),

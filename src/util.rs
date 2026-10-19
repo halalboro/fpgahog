@@ -113,9 +113,16 @@ pub fn command_for_later(installed: &Path, running: &Path) -> std::path::PathBuf
 }
 
 pub fn prog_for_later() -> String {
-    command_for_later(&installed_binary(), Path::new(&prog()))
-        .to_string_lossy()
-        .into_owned()
+    let installed = installed_binary();
+    // An older installed helper cannot read newer state, even if its path is stable.
+    let compatible = std::process::Command::new(&installed).arg("--version").output()
+        .is_ok_and(|out| out.status.success()
+            && String::from_utf8_lossy(&out.stdout).split_whitespace().last() == Some(env!("CARGO_PKG_VERSION")));
+    if compatible {
+        command_for_later(&installed, Path::new(&prog())).to_string_lossy().into_owned()
+    } else {
+        prog()
+    }
 }
 
 /// Whether `path` sits in a cargo build directory.

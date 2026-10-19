@@ -874,7 +874,7 @@ mod sync_tests {
         });
         state.claims.push(Claim {
             id: 1,
-            timeout: chrono::Local::now() + chrono::Duration::hours(1),
+            timeout: Some(chrono::Local::now() + chrono::Duration::hours(1)),
             soft_timeout: None,
             exclusive,
             user: me(),
@@ -1233,7 +1233,7 @@ mod duplicate_tests {
         state.settings.fpgas = vec![board("v80", &["S1"]), board("u280", &["S1"])];
         state.claims = vec![Claim {
             id: 1,
-            timeout: chrono::Local::now() + chrono::Duration::hours(1),
+            timeout: Some(chrono::Local::now() + chrono::Duration::hours(1)),
             soft_timeout: None,
             exclusive: true,
             user: crate::util::get_username(unsafe { libc::getuid() }),

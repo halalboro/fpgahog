@@ -62,6 +62,29 @@ fills the list only when one board uses that driver. Re-run it after a driver ch
 replaces a list whose nodes have all disappeared, and reports one that is only partly stale.
 `list` marks nodes `(MISSING)` and shows each cable's state.
 
+## Non-expiring and deployment reservations
+
+Use `sudo fpgahog claim v80 never` for an exclusive claim that lasts until
+`sudo fpgahog release v80`. Timed claims such as `claim v80 4h` remain supported.
+Non-expiring claims still receive periodic enforcement checks. State version 4
+represents them with `timeout: null`; existing timed state migrates on write.
+Do not run older binaries against the migrated state.
+
+Deployment tools can use `reservation acquire --bdf <BDF> --token <UUID>
+--expiry never` (or a future duration/date). This runs under the state lock,
+requires exactly one matching configured FPGA, rejects other users' claims
+with owner details, and verifies device/cable enforcement before succeeding.
+An existing exclusive claim owned by the caller is reused without changing
+its expiry. Otherwise the UUID identifies the newly created claim.
+
+`sudo fpgahog reservation release --token <UUID>` releases only the caller's
+claim created with that token; repeating it is harmless, and it cannot release
+a reused claim. `reservation verify --bdf <BDF>` reapplies and checks locks
+after driver reload. These commands require root (normally through `sudo`,
+which preserves the invoking user's identity). They never force a takeover.
+A missing configured device or cable fails enforcement verification rather
+than silently accepting an advisory reservation.
+
 ## What an exclusive claim enforces
 
 - **Device files** are `chown`ed to you and set to `0600`; the original ownership is recorded

@@ -13,7 +13,7 @@ use std::fs;
 static OVERLAY_PATH: Lazy<String> = Lazy::new(|| format!("{}/overlay", util::STATE_PATH));
 
 pub fn ssh_hogged_message(claim: &diskstate::Claim) -> String {
-    let duration = util::format_timeout_abs(claim.timeout);
+    let duration = claim.remaining();
     vec![
         format!("This system has been hogged by {}.", claim.user),
         format!("Comment: {}", claim.comment),
@@ -177,7 +177,7 @@ pub fn do_hog(mut users: Vec<String>, force: bool, state: &mut diskstate::DiskSt
                 "  {:<10} {} for another {}",
                 conflict.resource.to_string(),
                 conflict.user,
-                util::format_timeout_abs(conflict.until)
+                conflict.until.map(util::format_timeout_abs).unwrap_or_else(|| "until explicitly released".into())
             );
         }
         eprintln!("Wait for them to expire, or ask. Nothing was changed.");
@@ -487,7 +487,7 @@ mod release_tests {
     fn claim(user: &str, resources: &str, exclusive: bool) -> Claim {
         Claim {
             id: 0,
-            timeout: Local::now() + chrono::Duration::hours(1),
+            timeout: Some(Local::now() + chrono::Duration::hours(1)),
             soft_timeout: None,
             exclusive,
             user: user.into(),
@@ -537,7 +537,7 @@ mod hog_order_tests {
         let mut state = diskstate::load_default();
         let claim = diskstate::Claim {
             id: 1,
-            timeout: chrono::Local::now(),
+            timeout: Some(chrono::Local::now()),
             soft_timeout: None,
             exclusive: true,
             user: "me".into(),

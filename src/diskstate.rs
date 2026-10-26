@@ -6,12 +6,12 @@ use crate::util;
 use once_cell::sync::Lazy;
 
 static STATE_FILE: Lazy<String> = Lazy::new(|| format!("{}/fpgahog.json", util::STATE_PATH));
-const SUPPORTED_STATE_VERSIONS: [u32; 1] = [ 3 ];
-const DEFAULT_STATE_VERSION: u32 = 3;
+const SUPPORTED_STATE_VERSIONS: [u32; 1] = [ 4 ];
+const DEFAULT_STATE_VERSION: u32 = 4;
 /// Versions we know how to read and silently upgrade: hosthog's formats, where claims covered
 /// the whole host and there was no notion of an FPGA. v1 differs from v2 only in calling the
 /// stopped systemd units `disabled_systemd_timers`.
-const MIGRATABLE_STATE_VERSIONS: [u32; 2] = [ 1, 2 ];
+const MIGRATABLE_STATE_VERSIONS: [u32; 3] = [ 1, 2, 3 ];
 
 pub const HOST_RESOURCE: &str = "host";
 
@@ -94,7 +94,8 @@ pub struct Claim {
     /// edited -- which `release <resource>` does.
     #[serde(default)]
     pub id: u64,
-    pub timeout: DateTime<Local>,
+    /// None means explicitly released only; timed statefiles remain compatible.
+    pub timeout: Option<DateTime<Local>>,
     pub soft_timeout: Option<DateTime<Local>>,
     pub exclusive: bool,
     pub user: String,
@@ -106,6 +107,15 @@ pub struct Claim {
 }
 
 impl Claim {
+    pub fn active_at(&self, now: DateTime<Local>) -> bool {
+        self.timeout.is_none_or(|until| until > now)
+    }
+
+    pub fn remaining(&self) -> String {
+        self.timeout.map(crate::util::format_timeout_abs)
+            .unwrap_or_else(|| "until explicitly released".into())
+    }
+
     pub fn covers(&self, resource: &ResourceId) -> bool {
         self.resources.contains(resource)
     }
@@ -335,6 +345,8 @@ fn migrate(state: &mut DiskState) {
     // Claims and the hogger already defaulted to `[host]` while deserializing, and the new
     // collections defaulted to empty, so there is nothing else to fix up.
     state.state_version = DEFAULT_STATE_VERSION;
+    // Older queued binaries cannot read nullable expiry; schedule a fresh recheck.
+    state.recheck_at = None;
     println!(
         "Migrated statefile from version {} to {} ({} claims are now `{}` claims).",
         from, DEFAULT_STATE_VERSION, state.claims.len(), HOST_RESOURCE
@@ -465,7 +477,7 @@ pub fn maintenance(state: &mut DiskState, needs_release: &mut bool) -> Vec<Claim
     let mut new_claims = vec![];
     let mut dropped_claims = vec![];
     for claim in &state.claims {
-        if claim.timeout > now {
+        if claim.active_at(now) {
             new_claims.push(claim.clone());
         } else {
             dropped_claims.push(claim.clone());
@@ -545,7 +557,7 @@ mod tests {
     fn at(id: u64, user: &str, resources: &[&str], timeout: DateTime<Local>) -> Claim {
         Claim {
             id,
-            timeout,
+            timeout: Some(timeout),
             soft_timeout: None,
             exclusive: true,
             user: user.into(),
@@ -600,7 +612,7 @@ mod tests {
     fn claims_only_cover_what_they_name() {
         let claim = Claim {
             id: 1,
-            timeout: Local::now(),
+            timeout: Some(Local::now()),
             soft_timeout: None,
             exclusive: true,
             user: "me".into(),

@@ -513,12 +513,12 @@ mod tests {
     fn intended_owners_names_the_holder_of_each_board() {
         let mut state = load_default();
         state.claims = vec![
-            claim("anubhav", &["u280"], true),
+            claim("alice", &["u280"], true),
             claim("colleague", &["v80"], true),
         ];
         let owners = intended_owners(&state);
         assert_eq!(owners.len(), 2);
-        assert!(owners.contains(&("u280".to_string(), "anubhav".to_string())));
+        assert!(owners.contains(&("u280".to_string(), "alice".to_string())));
         assert!(owners.contains(&("v80".to_string(), "colleague".to_string())));
     }
 
@@ -528,7 +528,7 @@ mod tests {
     fn shared_and_host_claims_own_no_devices() {
         let mut state = load_default();
         state.claims = vec![
-            claim("anubhav", &["u280"], false),
+            claim("alice", &["u280"], false),
             claim("colleague", &["host"], true),
         ];
         assert!(intended_owners(&state).is_empty());
@@ -587,7 +587,7 @@ mod tests {
 mod device_prefix_tests {
     use super::*;
 
-    /// rose moved from one `coyote_driver` to per-platform drivers, whose nodes are named
+    /// A host moved from one `coyote_driver` to per-platform drivers, whose nodes are named
     /// after the platform. Without this, discover guessed nothing and could not heal the
     /// configured paths the rename orphaned.
     #[test]

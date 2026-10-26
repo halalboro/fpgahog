@@ -150,7 +150,7 @@ impl Claim {
 pub struct FpgaSpec {
     /// Short name used on the command line, e.g. "u280".
     pub alias: String,
-    /// PCI address. The stable identity of the board, e.g. "0000:c1:00.0".
+    /// PCI address. The stable identity of the board, e.g. "0000:02:00.0".
     pub bdf: String,
     /// "vendor:device" as seen at discovery time, kept so we can warn when a slot changed.
     #[serde(default)]
@@ -373,7 +373,7 @@ fn migrate(state: &mut DiskState) {
 pub const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Serialise commands that change state. Each one loads, changes and rewrites the whole file,
-/// so two at once dropped whichever change was written first: on rose nine of ten simultaneous
+/// so two at once dropped whichever change was written first: on hardware nine of ten simultaneous
 /// claims vanished. The lock is held until the returned file is dropped.
 pub fn lock() -> Result<std::fs::File, String> {
     std::fs::create_dir_all(util::STATE_PATH)
@@ -648,13 +648,13 @@ mod tests {
 mod hosthog_compat_tests {
     use super::*;
 
-    /// rose's statefile, byte for byte: hosthog from before it renamed systemd "timers" to
+    /// A real hosthog statefile, byte for byte, from before it renamed systemd "timers" to
     /// "units", which is the only difference between its v1 and v2 formats.
-    const ROSE_V1: &str = r#"{"hogger":null,"overmounts":[],"claims":[],"settings":{"authorized_keys_file":["%h/.ssh/authorized_keys","/etc/ssh/authorized_keys.d/%u"]},"disabled_systemd_timers":[],"state_version":1}"#;
+    const HOSTHOG_V1: &str = r#"{"hogger":null,"overmounts":[],"claims":[],"settings":{"authorized_keys_file":["%h/.ssh/authorized_keys","/etc/ssh/authorized_keys.d/%u"]},"disabled_systemd_timers":[],"state_version":1}"#;
 
     #[test]
     fn hosthog_v1_statefile_is_read_and_upgraded() {
-        let mut state: DiskState = serde_json::from_str(ROSE_V1).unwrap();
+        let mut state: DiskState = serde_json::from_str(HOSTHOG_V1).unwrap();
         migrate(&mut state);
         ensure_claim_ids(&mut state);
         assert_eq!(state.state_version, DEFAULT_STATE_VERSION);
@@ -665,7 +665,7 @@ mod hosthog_compat_tests {
     /// A v1 host that is hogged at upgrade time must still restart the units it stopped.
     #[test]
     fn v1_disabled_timers_carry_over_as_units() {
-        let hogged = ROSE_V1.replace(
+        let hogged = HOSTHOG_V1.replace(
             r#""disabled_systemd_timers":[]"#,
             r#""disabled_systemd_timers":["fstrim.timer"]"#,
         );
@@ -740,7 +740,7 @@ mod cable_state_tests {
         let mut state = load_default();
         state.settings.fpgas.push(FpgaSpec {
             alias: "u280".into(),
-            bdf: "0000:c1:00.0".into(),
+            bdf: "0000:02:00.0".into(),
             pci_id: String::new(),
             devices: vec![],
             cables: vec![],
@@ -757,10 +757,10 @@ mod cable_state_tests {
     fn cable_locks_round_trip() {
         let mut state = load_default();
         state.cable_locks.push(CableLock {
-            serial: "217702174005".into(),
+            serial: "0123456789AB".into(),
             alias: "u280".into(),
-            claimant: "anubhav".into(),
-            claimant_uid: 2049,
+            claimant: "alice".into(),
+            claimant_uid: 1000,
             jtag_orig: Ownership { uid: 0, gid: 0, mode: 0o666 },
             console_orig: Some(Ownership { uid: 0, gid: 27, mode: 0o660 }),
             port_disable: "/sys/devices/usb3/3-0:1.0/usb3-port2/disable".into(),

@@ -605,8 +605,8 @@ mod recheck_and_check_tests {
     fn state() -> DiskState {
         let mut state = load_default();
         state.settings.fpgas = vec![
-            FpgaSpec { alias: "u280".into(), bdf: "0000:c1:00.0".into(), pci_id: String::new(), devices: vec!["/dev/u280_v0".into()], cables: vec![] },
-            FpgaSpec { alias: "v80".into(), bdf: "0000:61:00.0".into(), pci_id: String::new(), devices: vec![], cables: vec![] },
+            FpgaSpec { alias: "u280".into(), bdf: "0000:02:00.0".into(), pci_id: String::new(), devices: vec!["/dev/u280_v0".into()], cables: vec![] },
+            FpgaSpec { alias: "v80".into(), bdf: "0000:01:00.0".into(), pci_id: String::new(), devices: vec![], cables: vec![] },
         ];
         state
     }
@@ -743,10 +743,10 @@ mod cable_enforcement_tests {
     fn board_with_only_a_cable() -> FpgaSpec {
         FpgaSpec {
             alias: "v80".into(),
-            bdf: "0000:61:00.0".into(),
+            bdf: "0000:01:00.0".into(),
             pci_id: String::new(),
             devices: vec![],
-            cables: vec!["XFL1EZVSAG4S".into()],
+            cables: vec!["ABCD1234EFGH".into()],
         }
     }
 

@@ -208,8 +208,8 @@ fn ownership_of(path: &Path) -> Option<Ownership> {
 }
 
 /// The ownership to restore on release. Read from the cable's files unless they cannot tell us:
-/// the cable is absent, or udev already handed the files to the claimant. Then rose's udev
-/// defaults are used (spec §1).
+/// the cable is absent, or udev already handed the files to the claimant. Then the host's
+/// usual udev defaults are used (spec §1).
 pub fn original_ownership(cable: Option<&Cable>, claimant_uid: u32, dialout_gid: u32) -> (Ownership, Option<Ownership>) {
     let default_jtag = Ownership { uid: 0, gid: 0, mode: 0o666 };
     let default_console = Ownership { uid: 0, gid: dialout_gid, mode: 0o660 };
@@ -398,7 +398,7 @@ pub fn sync(state: &mut DiskState, sysfs: &Path, dev: &Path, rules: &Path) {
 pub const REPLUG_WAIT: Duration = Duration::from_secs(10);
 
 /// Disconnect and reconnect the cable at its hub port. Unlike toggling `authorized`, this
-/// invalidates every open handle, the JTAG one included (probe on rose, 2026-09-14). Run it only
+/// invalidates every open handle, the JTAG one included (probed on hardware). Run it only
 /// after `sync` has written the udev rule, so the cable comes back already locked.
 pub fn evict(cable: &Cable, sysfs: &Path, dev: &Path, wait: Duration) -> Result<(), String> {
     fs::write(&cable.port_disable, "1")
@@ -663,8 +663,8 @@ mod find_tests {
     #[test]
     fn a_cable_is_found_with_its_jtag_node_consoles_and_port() {
         let tree = Tree::new("find");
-        tree.cable("3-2", "0403", "217702174005", "A-U280-P32G", 6, &[0, 4, 5, 6]);
-        let cable = find(&tree.sysfs, &tree.dev, "217702174005").unwrap().unwrap();
+        tree.cable("3-2", "0403", "0123456789AB", "A-U280-P32G", 6, &[0, 4, 5, 6]);
+        let cable = find(&tree.sysfs, &tree.dev, "0123456789AB").unwrap().unwrap();
         assert_eq!(cable.product, "A-U280-P32G");
         assert_eq!(cable.jtag, tree.dev.join("bus/usb/003/006"));
         let consoles: Vec<PathBuf> = ["ttyUSB0", "ttyUSB4", "ttyUSB5", "ttyUSB6"].iter().map(|t| tree.dev.join(t)).collect();
@@ -677,14 +677,14 @@ mod find_tests {
     #[test]
     fn three_consoles_are_as_good_as_four() {
         let tree = Tree::new("three");
-        tree.cable("3-1", "0403", "XFL1EZVSAG4S", "A-V80", 2, &[1, 2, 3]);
-        assert_eq!(find(&tree.sysfs, &tree.dev, "XFL1EZVSAG4S").unwrap().unwrap().consoles.len(), 3);
+        tree.cable("3-1", "0403", "ABCD1234EFGH", "A-V80", 2, &[1, 2, 3]);
+        assert_eq!(find(&tree.sysfs, &tree.dev, "ABCD1234EFGH").unwrap().unwrap().consoles.len(), 3);
     }
 
     #[test]
     fn an_unplugged_cable_is_none() {
         let tree = Tree::new("absent");
-        assert_eq!(find(&tree.sysfs, &tree.dev, "217702174005").unwrap(), None);
+        assert_eq!(find(&tree.sysfs, &tree.dev, "0123456789AB").unwrap(), None);
     }
 
     #[test]
@@ -698,15 +698,15 @@ mod find_tests {
     #[test]
     fn discover_offers_only_ftdi_and_xilinx_devices() {
         let tree = Tree::new("discover");
-        tree.cable("3-2", "0403", "217702174005", "A-U280-P32G", 3, &[5]);
+        tree.cable("3-2", "0403", "0123456789AB", "A-U280-P32G", 3, &[5]);
         tree.cable("1-1", "046d", "MOUSE1", "USB Mouse", 4, &[]);
         let serials: Vec<String> = discover(&tree.sysfs, &tree.dev).into_iter().map(|c| c.serial).collect();
-        assert_eq!(serials, vec!["217702174005"]);
+        assert_eq!(serials, vec!["0123456789AB"]);
     }
 
     #[test]
     fn only_plain_serials_are_accepted() {
-        for good in ["XFL1EZVSAG4S", "217702174005", "a.b_c-d"] {
+        for good in ["ABCD1234EFGH", "0123456789AB", "a.b_c-d"] {
             assert!(valid_serial(good), "{}", good);
         }
         for bad in ["", "a\"b", "a b", "a,b", "x\ny"] {
@@ -727,12 +727,12 @@ mod rule_tests {
     /// Exactly the two lines the spec gives per cable: one for the JTAG node, one for consoles.
     #[test]
     fn each_cable_gets_a_usb_line_and_a_tty_line() {
-        let text = render_rules(&[entry("217702174005", "anubhav")]);
+        let text = render_rules(&[entry("0123456789AB", "alice")]);
         assert!(text.contains(
-            "SUBSYSTEM==\"usb\", ENV{DEVTYPE}==\"usb_device\", ATTR{serial}==\"217702174005\", OWNER=\"anubhav\", MODE=\"0600\"\n"
+            "SUBSYSTEM==\"usb\", ENV{DEVTYPE}==\"usb_device\", ATTR{serial}==\"0123456789AB\", OWNER=\"alice\", MODE=\"0600\"\n"
         ));
         assert!(text.contains(
-            "SUBSYSTEM==\"tty\", ATTRS{serial}==\"217702174005\", OWNER=\"anubhav\", MODE=\"0600\"\n"
+            "SUBSYSTEM==\"tty\", ATTRS{serial}==\"0123456789AB\", OWNER=\"alice\", MODE=\"0600\"\n"
         ));
         assert_eq!(text.lines().filter(|l| l.starts_with("SUBSYSTEM")).count(), 2);
     }
@@ -741,8 +741,8 @@ mod rule_tests {
     fn the_rule_file_is_created_with_its_directory() {
         let tree = Tree::new("rules-write");
         let path = tree.root.join("run/udev/rules.d/99-fpgahog.rules");
-        write_rules(&path, &[entry("217702174005", "anubhav")]).unwrap();
-        assert!(fs::read_to_string(&path).unwrap().contains("217702174005"));
+        write_rules(&path, &[entry("0123456789AB", "alice")]).unwrap();
+        assert!(fs::read_to_string(&path).unwrap().contains("0123456789AB"));
         assert!(!path.with_extension("rules.tmp").exists(), "temporary file left behind");
     }
 
@@ -751,7 +751,7 @@ mod rule_tests {
     fn an_empty_rule_set_removes_the_file() {
         let tree = Tree::new("rules-empty");
         let path = tree.root.join("99-fpgahog.rules");
-        write_rules(&path, &[entry("217702174005", "anubhav")]).unwrap();
+        write_rules(&path, &[entry("0123456789AB", "alice")]).unwrap();
         write_rules(&path, &[]).unwrap();
         assert!(!path.exists());
         write_rules(&path, &[]).unwrap(); // removing a file that is already gone is fine
@@ -783,32 +783,32 @@ mod plan_tests {
 
     #[test]
     fn a_newly_claimed_cable_is_recorded() {
-        let actions = plan(&[wanted("S1", "anubhav", 2049)], &[], |_| true);
-        assert_eq!(actions, vec![Action::Record(wanted("S1", "anubhav", 2049))]);
+        let actions = plan(&[wanted("S1", "alice", 1000)], &[], |_| true);
+        assert_eq!(actions, vec![Action::Record(wanted("S1", "alice", 1000))]);
     }
 
     #[test]
     fn a_held_cable_needs_nothing() {
-        assert!(plan(&[wanted("S1", "anubhav", 2049)], &[lock("S1", "anubhav", 2049)], |_| true).is_empty());
+        assert!(plan(&[wanted("S1", "alice", 1000)], &[lock("S1", "alice", 1000)], |_| true).is_empty());
     }
 
     #[test]
     fn a_released_cable_that_is_plugged_in_is_restored() {
-        let actions = plan(&[], &[lock("S1", "anubhav", 2049)], |_| true);
-        assert_eq!(actions, vec![Action::Restore(lock("S1", "anubhav", 2049))]);
+        let actions = plan(&[], &[lock("S1", "alice", 1000)], |_| true);
+        assert_eq!(actions, vec![Action::Restore(lock("S1", "alice", 1000))]);
     }
 
     /// Nothing to put back: udev's own defaults apply when it is plugged in again.
     #[test]
     fn a_released_cable_that_is_unplugged_is_dropped() {
-        let actions = plan(&[], &[lock("S1", "anubhav", 2049)], |_| false);
-        assert_eq!(actions, vec![Action::Drop(lock("S1", "anubhav", 2049))]);
+        let actions = plan(&[], &[lock("S1", "alice", 1000)], |_| false);
+        assert_eq!(actions, vec![Action::Drop(lock("S1", "alice", 1000))]);
     }
 
     #[test]
     fn a_board_that_changed_hands_is_repointed() {
-        let actions = plan(&[wanted("S1", "theo", 1234)], &[lock("S1", "anubhav", 2049)], |_| true);
-        assert_eq!(actions, vec![Action::Repoint(wanted("S1", "theo", 1234))]);
+        let actions = plan(&[wanted("S1", "bob", 1234)], &[lock("S1", "alice", 1000)], |_| true);
+        assert_eq!(actions, vec![Action::Repoint(wanted("S1", "bob", 1234))]);
     }
 
     fn set_mode(path: &Path, mode: u32) {
@@ -846,7 +846,7 @@ mod plan_tests {
 
     #[test]
     fn an_absent_cable_gets_the_defaults() {
-        let (jtag, console) = original_ownership(None, 2049, 27);
+        let (jtag, console) = original_ownership(None, 1000, 27);
         assert_eq!(jtag, Ownership { uid: 0, gid: 0, mode: 0o666 });
         assert_eq!(console, Some(Ownership { uid: 0, gid: 27, mode: 0o660 }));
     }
@@ -867,10 +867,10 @@ mod sync_tests {
         let mut state = load_default();
         state.settings.fpgas.push(FpgaSpec {
             alias: "u280".into(),
-            bdf: "0000:c1:00.0".into(),
+            bdf: "0000:02:00.0".into(),
             pci_id: String::new(),
             devices: vec![],
-            cables: vec!["217702174005".into()],
+            cables: vec!["0123456789AB".into()],
         });
         state.claims.push(Claim {
             id: 1,
@@ -891,8 +891,8 @@ mod sync_tests {
 
     /// Plug the U280 cable in with udev's usual modes: JTAG 0666, consoles 0660.
     fn plug(tree: &Tree, devnum: u32, consoles: &[u32]) -> Cable {
-        tree.cable("3-2", "0403", "217702174005", "A-U280-P32G", devnum, consoles);
-        let cable = find(&tree.sysfs, &tree.dev, "217702174005").unwrap().unwrap();
+        tree.cable("3-2", "0403", "0123456789AB", "A-U280-P32G", devnum, consoles);
+        let cable = find(&tree.sysfs, &tree.dev, "0123456789AB").unwrap().unwrap();
         fs::set_permissions(&cable.jtag, fs::Permissions::from_mode(0o666)).unwrap();
         for console in &cable.consoles {
             fs::set_permissions(console, fs::Permissions::from_mode(0o660)).unwrap();
@@ -910,7 +910,7 @@ mod sync_tests {
         assert_eq!(mode(&cable.jtag), 0o600);
         assert!(cable.consoles.iter().all(|c| mode(c) == 0o600));
         let text = fs::read_to_string(&rules).unwrap();
-        assert!(text.contains("217702174005") && text.contains(&format!("OWNER=\"{}\"", me())));
+        assert!(text.contains("0123456789AB") && text.contains(&format!("OWNER=\"{}\"", me())));
         assert_eq!(state.cable_locks.len(), 1);
         assert_eq!(state.cable_locks[0].jtag_orig.mode, 0o666);
         assert_eq!(state.cable_locks[0].console_orig.unwrap().mode, 0o660);
@@ -981,9 +981,9 @@ mod sync_tests {
         let rules = tree.root.join("rules.d/99-fpgahog.rules");
         let mut state = state_with_claim(true);
         sync(&mut state, &tree.sysfs, &tree.dev, &rules);
-        assert_eq!(view(&state, "217702174005", &tree.sysfs, &tree.dev), CableView::Present { locked: true });
+        assert_eq!(view(&state, "0123456789AB", &tree.sysfs, &tree.dev), CableView::Present { locked: true });
         fs::set_permissions(&cable.jtag, fs::Permissions::from_mode(0o666)).unwrap();
-        assert_eq!(view(&state, "217702174005", &tree.sysfs, &tree.dev), CableView::Present { locked: false });
+        assert_eq!(view(&state, "0123456789AB", &tree.sysfs, &tree.dev), CableView::Present { locked: false });
         assert_eq!(view(&state, "NOPE", &tree.sysfs, &tree.dev), CableView::Absent);
         assert_eq!(view(&state, "bad serial", &tree.sysfs, &tree.dev), CableView::Invalid);
     }
@@ -998,8 +998,8 @@ mod evict_tests {
     #[test]
     fn eviction_disconnects_and_reconnects_the_port_then_waits_for_the_cable() {
         let tree = Tree::new("evict-ok");
-        tree.cable("3-2", "0403", "217702174005", "A-U280-P32G", 6, &[0]);
-        let cable = find(&tree.sysfs, &tree.dev, "217702174005").unwrap().unwrap();
+        tree.cable("3-2", "0403", "0123456789AB", "A-U280-P32G", 6, &[0]);
+        let cable = find(&tree.sysfs, &tree.dev, "0123456789AB").unwrap().unwrap();
         evict(&cable, &tree.sysfs, &tree.dev, Duration::from_secs(2)).unwrap();
         assert_eq!(fs::read_to_string(&cable.port_disable).unwrap(), "0");
     }
@@ -1007,8 +1007,8 @@ mod evict_tests {
     #[test]
     fn a_cable_that_does_not_come_back_is_an_error() {
         let tree = Tree::new("evict-gone");
-        tree.cable("3-2", "0403", "217702174005", "A-U280-P32G", 6, &[0]);
-        let cable = find(&tree.sysfs, &tree.dev, "217702174005").unwrap().unwrap();
+        tree.cable("3-2", "0403", "0123456789AB", "A-U280-P32G", 6, &[0]);
+        let cable = find(&tree.sysfs, &tree.dev, "0123456789AB").unwrap().unwrap();
         fs::remove_file(&cable.jtag).unwrap();
         let err = evict(&cable, &tree.sysfs, &tree.dev, Duration::from_millis(300)).unwrap_err();
         assert!(err.contains("did not come back"), "{}", err);
@@ -1019,8 +1019,8 @@ mod evict_tests {
     #[test]
     fn the_port_control_survives_the_device_disappearing() {
         let tree = Tree::new("evict-portpath");
-        tree.cable("3-2", "0403", "217702174005", "A-U280-P32G", 6, &[0]);
-        let cable = find(&tree.sysfs, &tree.dev, "217702174005").unwrap().unwrap();
+        tree.cable("3-2", "0403", "0123456789AB", "A-U280-P32G", 6, &[0]);
+        let cable = find(&tree.sysfs, &tree.dev, "0123456789AB").unwrap().unwrap();
         tree.remove_cable("3-2");
         assert!(cable.port_disable.exists(), "{} went away with the device", cable.port_disable.display());
         fs::write(&cable.port_disable, "0").unwrap();
@@ -1029,8 +1029,8 @@ mod evict_tests {
     #[test]
     fn a_missing_port_control_is_an_error() {
         let tree = Tree::new("evict-noport");
-        tree.cable("3-2", "0403", "217702174005", "A-U280-P32G", 6, &[0]);
-        let cable = find(&tree.sysfs, &tree.dev, "217702174005").unwrap().unwrap();
+        tree.cable("3-2", "0403", "0123456789AB", "A-U280-P32G", 6, &[0]);
+        let cable = find(&tree.sysfs, &tree.dev, "0123456789AB").unwrap().unwrap();
         fs::remove_dir_all(cable.port_disable.parent().unwrap()).unwrap();
         let err = evict(&cable, &tree.sysfs, &tree.dev, Duration::from_millis(300)).unwrap_err();
         assert!(err.contains("cannot disable"), "{}", err);
@@ -1079,37 +1079,37 @@ mod assign_tests {
         Cable { serial: serial.into(), product: product.into(), jtag: PathBuf::new(), consoles: vec![], port_disable: PathBuf::new() }
     }
 
-    fn rose() -> Vec<Cable> {
-        vec![cable("XFL1EZVSAG4S", "A-V80"), cable("217702174005", "A-U280-P32G")]
+    fn two_cables() -> Vec<Cable> {
+        vec![cable("ABCD1234EFGH", "A-V80"), cable("0123456789AB", "A-U280-P32G")]
     }
 
     #[test]
     fn boards_get_the_cable_named_after_them() {
-        let pairs = assign(&[board("v80", &[]), board("u280", &[])], &rose());
+        let pairs = assign(&[board("v80", &[]), board("u280", &[])], &two_cables());
         assert_eq!(pairs, vec![
-            ("v80".to_string(), "XFL1EZVSAG4S".to_string()),
-            ("u280".to_string(), "217702174005".to_string()),
+            ("v80".to_string(), "ABCD1234EFGH".to_string()),
+            ("u280".to_string(), "0123456789AB".to_string()),
         ]);
     }
 
     #[test]
     fn placeholder_names_match_nothing() {
-        assert!(assign(&[board("fpga0", &[])], &rose()).is_empty());
+        assert!(assign(&[board("fpga0", &[])], &two_cables()).is_empty());
     }
 
     #[test]
     fn a_board_matching_two_cables_is_left_for_a_human() {
-        assert!(assign(&[board("a", &[])], &rose()).is_empty());
+        assert!(assign(&[board("a", &[])], &two_cables()).is_empty());
     }
 
     #[test]
     fn a_cable_matching_two_boards_is_left_for_a_human() {
-        assert!(assign(&[board("u280", &[]), board("280", &[])], &rose()).is_empty());
+        assert!(assign(&[board("u280", &[]), board("280", &[])], &two_cables()).is_empty());
     }
 
     #[test]
     fn a_board_with_cables_is_never_touched() {
-        assert!(assign(&[board("u280", &["SET-BY-HAND"])], &rose()).is_empty());
+        assert!(assign(&[board("u280", &["SET-BY-HAND"])], &two_cables()).is_empty());
     }
 }
 
@@ -1158,7 +1158,7 @@ mod repair_tests {
         let tree = Tree::new("repair-lock");
         let port = port_file(&tree, "1");
         let mut state = load_default();
-        state.cable_locks.push(lock_with_port("217702174005", &port));
+        state.cable_locks.push(lock_with_port("0123456789AB", &port));
         reenable_disabled_ports(&mut state);
         assert_eq!(fs::read_to_string(&port).unwrap().trim(), "0");
     }
@@ -1179,8 +1179,8 @@ mod repair_tests {
         let tree = Tree::new("repair-view");
         let port = port_file(&tree, "1");
         let mut state = load_default();
-        state.cable_locks.push(lock_with_port("217702174005", &port));
-        assert_eq!(view(&state, "217702174005", &tree.sysfs, &tree.dev), CableView::PortDisabled);
+        state.cable_locks.push(lock_with_port("0123456789AB", &port));
+        assert_eq!(view(&state, "0123456789AB", &tree.sysfs, &tree.dev), CableView::PortDisabled);
         assert_eq!(describe(true, &[CableView::PortDisabled]).as_deref(), Some("cable port disabled"));
     }
 
@@ -1247,9 +1247,9 @@ mod duplicate_tests {
 
     #[test]
     fn assign_skips_a_serial_another_board_already_uses() {
-        let specs = [board("v80", &["217702174005"]), board("u280", &[])];
+        let specs = [board("v80", &["0123456789AB"]), board("u280", &[])];
         let cables = vec![Cable {
-            serial: "217702174005".into(),
+            serial: "0123456789AB".into(),
             product: "A-U280-P32G".into(),
             jtag: PathBuf::new(),
             consoles: vec![],

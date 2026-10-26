@@ -366,8 +366,8 @@ fn release_claims(claims: &mut Vec<diskstate::Claim>, me: &str, selected: &[Reso
 }
 
 /// Whether `file` is currently a mount point. The mount point field is compared exactly: the
-/// substring match hosthog used reports `/etc/ssh/authorized_keys.d/chris` as mounted whenever
-/// `.../christianK` is, and rose has both that pair and `martin`/`martinLi`.
+/// substring match hosthog used reports `/etc/ssh/authorized_keys.d/sam` as mounted whenever
+/// `.../samantha` is, and real hosts do have account names that prefix one another.
 pub fn is_overmounted(file: &str) -> bool {
     let mounts = std::fs::read_to_string("/proc/mounts").expect("Cant read /proc/mounts");
     return mount_points_contain(&mounts, file);
@@ -395,7 +395,7 @@ fn uncovered_key_patterns(sshd_config: &str, configured: &[String]) -> Vec<Strin
     let mut uncovered = vec![];
     for line in sshd_config.lines() {
         let mut words = line.split_whitespace();
-        // Older OpenSSH prints `authorizedkeysfile`; current releases, including rose's, print
+        // Older OpenSSH prints `authorizedkeysfile`; current releases print
         // `AuthorizedKeysFile`. A case-sensitive match silently disabled this whole check.
         match words.next() {
             Some(keyword) if keyword.eq_ignore_ascii_case("authorizedkeysfile") => {}
@@ -418,8 +418,8 @@ fn uncovered_key_patterns(sshd_config: &str, configured: &[String]) -> Vec<Strin
     uncovered
 }
 
-/// A hog can report success and lock out nobody: on rose sshd reads only
-/// /etc/ssh/authorized_keys.d/%u, so a key list without that entry does nothing at all.
+/// A hog can report success and lock out nobody: where sshd reads only
+/// /etc/ssh/authorized_keys.d/%u, a key list without that entry does nothing at all.
 fn warn_if_sshd_reads_elsewhere(settings: &diskstate::Settings) {
     let output = match std::process::Command::new("sshd").arg("-T").output() {
         Ok(output) if output.status.success() => output,
@@ -439,15 +439,15 @@ mod tests {
     use super::*;
 
     const MOUNTS: &str = "zroot/root/nixos /nix/store zfs ro 0 0
-tmpfs /etc/ssh/authorized_keys.d/christianK tmpfs rw 0 0
+tmpfs /etc/ssh/authorized_keys.d/samantha tmpfs rw 0 0
 nfs:/export/home /home/some\\040one/.ssh/authorized_keys nfs4 rw 0 0
 ";
 
-    /// Regression: `chris` read as mounted because `christianK` was.
+    /// Regression: `sam` read as mounted because `samantha` was.
     #[test]
     fn a_prefix_of_a_mounted_name_is_not_itself_mounted() {
-        assert!(mount_points_contain(MOUNTS, "/etc/ssh/authorized_keys.d/christianK"));
-        assert!(!mount_points_contain(MOUNTS, "/etc/ssh/authorized_keys.d/chris"));
+        assert!(mount_points_contain(MOUNTS, "/etc/ssh/authorized_keys.d/samantha"));
+        assert!(!mount_points_contain(MOUNTS, "/etc/ssh/authorized_keys.d/sam"));
     }
 
     #[test]
@@ -455,10 +455,10 @@ nfs:/export/home /home/some\\040one/.ssh/authorized_keys nfs4 rw 0 0
         assert!(mount_points_contain(MOUNTS, "/home/some one/.ssh/authorized_keys"));
     }
 
-    /// Regression: with only `%h/.ssh/authorized_keys` configured, a hog on rose locked out
-    /// nobody, because sshd there reads /etc/ssh/authorized_keys.d/%u alone. These are the
-    /// lines rose's `sshd -T` actually prints: CamelCase, with a similarly named keyword that
-    /// must not be mistaken for the key file setting.
+    /// Regression: with only `%h/.ssh/authorized_keys` configured, a hog locked out nobody on
+    /// a host whose sshd reads /etc/ssh/authorized_keys.d/%u alone. These are the lines such an
+    /// `sshd -T` actually prints: CamelCase, with a similarly named keyword that must not be
+    /// mistaken for the key file setting.
     #[test]
     fn a_key_path_sshd_reads_but_hog_skips_is_reported() {
         let sshd = "Port 22\nAuthorizedKeysCommand none\nAuthorizedKeysCommandUser none\nAuthorizedKeysFile /etc/ssh/authorized_keys.d/%u\n";
@@ -551,7 +551,7 @@ mod hog_order_tests {
             &mut state,
             claim,
             |state| {
-                state.overmounts.push("/etc/ssh/authorized_keys.d/theo".into());
+                state.overmounts.push("/etc/ssh/authorized_keys.d/bob".into());
                 log.borrow_mut().push("ssh".into());
             },
             |state| {

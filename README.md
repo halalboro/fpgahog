@@ -1,4 +1,4 @@
-# 🦔 fpgahog
+# 🦦 fpgahog
 
 Reserve FPGAs, and whole hosts, on machines you share with other people.
 

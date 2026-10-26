@@ -25,13 +25,13 @@ Commands:
 Anything claimable is a *resource*: `host` is the whole machine, every other name is an FPGA.
 
 ```bash
-sudo fpgahog claim u280 4h running perf tests   # one board
-sudo fpgahog claim host 15min --exclusive       # the machine
-sudo fpgahog claim host,u280 2h                 # both at once
-sudo fpgahog release u280                       # give one back
-sudo fpgahog release                            # give back your hogs and exclusive claims
-sudo fpgahog hog                                # lock ssh, timers and every board
-fpgahog check u280 || exit 1                    # in a script, before touching a board
+sudo fpgahog claim board-a 4h running perf tests  # one board
+sudo fpgahog claim host 15min --exclusive         # the machine
+sudo fpgahog claim host,board-a 2h                # both at once
+sudo fpgahog release board-a                      # give one back
+sudo fpgahog release                              # give back your hogs and exclusive claims
+sudo fpgahog hog                                  # lock ssh, timers and every board
+fpgahog check board-a || exit 1                   # in a script, before touching a board
 ```
 
 Claims on different boards never collide, so two people can use two cards at once. FPGA claims
@@ -45,22 +45,24 @@ sudo fpgahog discover --write
 ```
 
 This scans PCI and USB, registering boards under placeholder names (`fpga0`, `fpga1`, …) and
-assigning each one the JTAG cable whose product name matches its alias. Then edit
+assigning each one the JTAG cable whose USB product name contains its alias. Then edit
 `settings.fpgas` in `/var/lib/fpgahog/fpgahog.json` to give the boards real names and check
 what was guessed:
 
 ```json
-{ "alias": "u280", "bdf": "0000:c1:00.0", "pci_id": "10ee:903f",
-  "devices": ["/dev/coyote_ultrascale_plus_fpga_0_reconfig",
-              "/dev/coyote_ultrascale_plus_fpga_0_v0"],
-  "cables":  ["217702174005"] }
+{ "alias": "board-a", "bdf": "0000:01:00.0", "pci_id": "10ee:0000",
+  "devices": ["/dev/myfpga0_ctrl", "/dev/myfpga0_data"],
+  "cables":  ["0123456789AB"] }
 ```
 
-A human has to check `devices`: a node named `coyote_fpga_0` carries an enumeration index, not
-a PCI address, so when two cards share a driver nothing says which node is which. `discover`
-fills the list only when one board uses that driver. Re-run it after a driver change; it
-replaces a list whose nodes have all disappeared, and reports one that is only partly stale.
-`list` marks nodes `(MISSING)` and shows each cable's state.
+`alias` is the name you claim the board by, `devices` the character devices that give access
+to it, and `cables` the USB serials of its JTAG cables.
+
+A human has to check `devices`: a node named `myfpga0` carries an enumeration index, not a PCI
+address, so when two cards share a driver nothing says which node belongs to which slot.
+`discover` fills the list only when one board uses that driver. Re-run it after a driver
+change; it replaces a list whose nodes have all disappeared, and reports one that is only
+partly stale. `list` marks nodes `(MISSING)` and shows each cable's state.
 
 ## What an exclusive claim enforces
 

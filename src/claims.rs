@@ -3,6 +3,7 @@ use crate::ClaimCommand;
 use crate::cable;
 use crate::diskstate::{Claim, DiskState, ResourceId, HOST_RESOURCE};
 use crate::fpga;
+use crate::inhibit;
 use crate::{parse_timeout, try_parse_timeout};
 use crate::users;
 use crate::util;
@@ -19,17 +20,22 @@ fn next_minute(timeout: DateTime<Local>) -> DateTime<Local> {
 pub(crate) fn schedule_maintenance(timeout: DateTime<Local>) {
     let timeout = next_minute(timeout);
     let binary = util::prog_for_later();
-    if util::is_build_output(std::path::Path::new(&binary)) {
+    // Anything but the pinned install is a path root re-executes every five minutes and that
+    // nobody promised to keep: a build output, an un-rooted nix store path from `nix run`, a
+    // binary in somebody's home directory.
+    if std::path::Path::new(&binary) != util::installed_binary() {
         println!(
-            "WARN: the job below runs {}, a build output. If it is gone by then, the claim is not ended on time. Install with `just install`.",
-            binary
+            "WARN: the job below runs {}, which is not the pinned install at {}. Root re-runs that path on every re-check, and if it is gone or replaced by then the claim is not ended on time. Install with `just install`.",
+            binary,
+            util::installed_binary().display()
         );
     }
-    // Log to the journal instead of letting at mail the output of every re-check.
-    // Preserve the Nix runtime utilities for subsequent rechecks launched by at.
+    // Log to the journal instead of letting at mail the output of every re-check. `at`
+    // restores the submitting user's environment, PATH included, and the job runs as root, so
+    // the two commands on this line are named absolutely. That is not the whole story:
+    // `fpgahog maintenance` then resolves `at` through that same PATH to re-arm the chain.
     let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
-    let future_command = format!("export PATH={}; {} maintenance 2>&1 | logger -t fpgahog",
-        quote(&std::env::var("PATH").unwrap_or_default()), quote(&binary));
+    let future_command = format!("{} maintenance {}", quote(&binary), util::maintenance_sink());
     let future = format!("{}", timeout.format("%H:%M %Y-%m-%d"));
     println!("Scheduling job {} at {}", future_command, future);
     match Command::new("at").arg(future).stdin(Stdio::piped()).spawn() {
@@ -105,13 +111,19 @@ pub const RECHECK_MINUTES: i64 = 5;
 /// exclusive claim on a board with device nodes keeps one job pending at all times, because a
 /// driver reload recreates the nodes world-writable and nothing else would notice.
 pub fn next_recheck(state: &DiskState, now: DateTime<Local>) -> Option<DateTime<Local>> {
-    if !guards_a_board(state, now) {
+    if !needs_recheck(state, now) {
         return None;
     }
     match state.recheck_at {
         Some(pending) if pending > now => None,
         _ => Some(now + Duration::minutes(RECHECK_MINUTES)),
     }
+}
+
+/// Whether anything has to be re-asserted from time to time: a board whose nodes a driver
+/// reload hands back, or an inhibitor whose holder could be killed.
+fn needs_recheck(state: &DiskState, now: DateTime<Local>) -> bool {
+    guards_a_board(state, now) || inhibit::reason(state, now).is_some()
 }
 
 /// Whether a live exclusive claim covers a board with device files or a cable to protect.
@@ -127,10 +139,12 @@ fn guards_a_board(state: &DiskState, now: DateTime<Local>) -> bool {
         })
 }
 
-/// Queue the next re-check when one is due, and forget the chain once no board needs it.
+/// Reassert everything that cannot be left alone: the reboot inhibitor, and the chain of
+/// `at` jobs that re-checks the locks. Called wherever `fpga::sync_locks` is.
 pub fn keep_locks_asserted(state: &mut DiskState) {
     let now = Local::now();
-    if !guards_a_board(state, now) {
+    inhibit::sync(state);
+    if !needs_recheck(state, now) {
         state.recheck_at = None;
         return;
     }
@@ -345,6 +359,7 @@ pub fn do_claim(cmd: &ClaimCommand, state: &mut DiskState) {
         user: me.clone(),
         comment: args.comment.join(" "),
         resources: requested,
+        inhibit: !cmd.no_inhibit,
     };
 
     state.claims.push(claim.clone());
@@ -448,6 +463,7 @@ mod tests {
             user: user.to_string(),
             comment: String::new(),
             resources: resources.iter().map(|r| ResourceId::parse(r)).collect(),
+            inhibit: true,
         }
     }
 
@@ -604,18 +620,33 @@ mod recheck_and_check_tests {
             user: user.into(),
             comment: String::new(),
             resources: ResourceId::parse_list(resources),
+            inhibit: true,
         }
     }
 
-    /// Nothing to guard: a host claim, a shared board claim, and a board without device nodes.
+    /// No locks to guard: a host claim, a shared board claim, and a board without device
+    /// nodes. The chain still runs, because those claims hold the reboot inhibitor and its
+    /// holder is a process that can die.
     #[test]
-    fn no_recheck_without_an_enforceable_exclusive_board_claim() {
+    fn claims_with_no_locks_still_keep_the_chain_alive_for_the_inhibitor() {
         let mut s = state();
         s.claims = vec![
             claim("me", "host", true, Span::hours(1)),
             claim("me", "u280", false, Span::hours(1)),
             claim("me", "v80", true, Span::hours(1)),
         ];
+        assert!(!guards_a_board(&s, Local::now()));
+        let now = Local::now();
+        assert_eq!(next_recheck(&s, now), Some(now + Span::minutes(RECHECK_MINUTES)));
+    }
+
+    /// Nothing claimed, nothing opted in: no job is queued at all.
+    #[test]
+    fn no_recheck_with_nothing_to_guard_and_nothing_to_inhibit() {
+        let mut s = state();
+        let mut only = claim("me", "host", true, Span::hours(1));
+        only.inhibit = false;
+        s.claims = vec![only];
         assert_eq!(next_recheck(&s, Local::now()), None);
     }
 
@@ -732,6 +763,7 @@ mod cable_enforcement_tests {
             user: "me".into(),
             comment: String::new(),
             resources: ResourceId::parse_list("v80"),
+            inhibit: true,
         }];
         assert!(next_recheck(&state, Local::now()).is_some());
     }

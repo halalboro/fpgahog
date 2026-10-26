@@ -505,6 +505,7 @@ mod tests {
             user: user.into(),
             comment: String::new(),
             resources: resources.iter().map(|r| ResourceId::parse(r)).collect(),
+            inhibit: true,
         }
     }
 

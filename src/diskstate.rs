@@ -6,12 +6,15 @@ use crate::util;
 use once_cell::sync::Lazy;
 
 static STATE_FILE: Lazy<String> = Lazy::new(|| format!("{}/fpgahog.json", util::STATE_PATH));
-const SUPPORTED_STATE_VERSIONS: [u32; 1] = [ 4 ];
-const DEFAULT_STATE_VERSION: u32 = 4;
+const SUPPORTED_STATE_VERSIONS: [u32; 1] = [ 5 ];
+const DEFAULT_STATE_VERSION: u32 = 5;
 /// Versions we know how to read and silently upgrade: hosthog's formats, where claims covered
 /// the whole host and there was no notion of an FPGA. v1 differs from v2 only in calling the
 /// stopped systemd units `disabled_systemd_timers`.
-const MIGRATABLE_STATE_VERSIONS: [u32; 3] = [ 1, 2, 3 ];
+/// v4 differs from v5 only by the per-claim `inhibit` flag, which has a default -- but a v4
+/// binary would read a v5 file happily and drop the flag when it wrote the file back, turning
+/// somebody's `--no-inhibit` into an inhibiting claim. The version bump makes it say no.
+const MIGRATABLE_STATE_VERSIONS: [u32; 4] = [ 1, 2, 3, 4 ];
 
 pub const HOST_RESOURCE: &str = "host";
 
@@ -104,6 +107,14 @@ pub struct Claim {
     /// always about the whole host, which is what the default reproduces.
     #[serde(default = "default_host_resources")]
     pub resources: Vec<ResourceId>,
+    /// Whether this claim holds off reboots and suspends. Defaults to yes, because losing a
+    /// run to someone else's reboot is the common accident; `claim --no-inhibit` opts out.
+    #[serde(default = "inhibits_by_default")]
+    pub inhibit: bool,
+}
+
+fn inhibits_by_default() -> bool {
+    true
 }
 
 impl Claim {
@@ -347,9 +358,14 @@ fn migrate(state: &mut DiskState) {
     state.state_version = DEFAULT_STATE_VERSION;
     // Older queued binaries cannot read nullable expiry; schedule a fresh recheck.
     state.recheck_at = None;
+    // Only hosthog's formats had no notion of a resource; from v3 on, claims already name one.
+    let note = match from < 3 {
+        true => format!(" ({} claims are now `{}` claims)", state.claims.len(), HOST_RESOURCE),
+        false => String::new(),
+    };
     println!(
-        "Migrated statefile from version {} to {} ({} claims are now `{}` claims).",
-        from, DEFAULT_STATE_VERSION, state.claims.len(), HOST_RESOURCE
+        "Migrated statefile from version {} to {}{}.",
+        from, DEFAULT_STATE_VERSION, note
     );
 }
 
@@ -563,6 +579,7 @@ mod tests {
             user: user.into(),
             comment: String::new(),
             resources: resources.iter().map(|r| ResourceId::parse(r)).collect(),
+            inhibit: true,
         }
     }
 
@@ -618,6 +635,7 @@ mod tests {
             user: "me".into(),
             comment: String::new(),
             resources: vec![ResourceId::Fpga("u280".into())],
+            inhibit: true,
         };
         assert!(claim.covers_alias("u280"));
         assert!(!claim.covers_alias("v80"));

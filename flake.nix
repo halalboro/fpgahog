@@ -67,9 +67,12 @@
             nativeBuildInputs = [ pkgs.makeWrapper ];
             postBuild = ''
               wrapProgram $out/bin/fpgahog \
-                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.util-linux pkgs.at ]}
-              wrapProgram $out/bin/hosthog \
-                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.util-linux pkgs.at ]}
+                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.util-linux pkgs.at pkgs.coreutils ]}
+              # Point the compatibility name at the wrapper, not at the binary behind it:
+              # wrapping it a second time would leave argv[0] as `.hosthog-wrapped`, which is
+              # what `hosthog --help` would then call itself.
+              rm $out/bin/hosthog
+              ln -s fpgahog $out/bin/hosthog
             '';
             meta = fpgahog.meta;
           };

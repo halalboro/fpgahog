@@ -243,6 +243,7 @@ pub fn run(action: Action, state: &mut DiskState) -> Result<String, String> {
                 user: me.clone(),
                 comment: mark.clone(),
                 resources: vec![ResourceId::Fpga(spec.alias.clone())],
+                inhibit: true,
             });
             diskstate::store(state);
             fpga::sync_locks(state);
@@ -287,6 +288,7 @@ mod tests {
             user: user.into(),
             comment: comment.into(),
             resources: vec![ResourceId::Fpga("v80".into())],
+            inhibit: true,
         }
     }
     #[test]

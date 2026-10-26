@@ -315,8 +315,9 @@ pub fn do_release(selected: Vec<String>, state: &mut diskstate::DiskState) {
         release_host(state);
     }
 
-    // Hand the device nodes back.
+    // Hand the device nodes back, and let go of the inhibitor if that was the last claim.
     fpga::sync_locks(state);
+    claims::keep_locks_asserted(state);
 
     if released.is_empty() {
         println!("Nothing to release (you hold no matching claims).");
@@ -493,6 +494,7 @@ mod release_tests {
             user: user.into(),
             comment: String::new(),
             resources: ResourceId::parse_list(resources),
+            inhibit: true,
         }
     }
 
@@ -543,6 +545,7 @@ mod hog_order_tests {
             user: "me".into(),
             comment: String::new(),
             resources: vec![ResourceId::Host],
+            inhibit: true,
         };
         apply_hog(
             &mut state,

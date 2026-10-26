@@ -880,6 +880,7 @@ mod sync_tests {
             user: me(),
             comment: String::new(),
             resources: vec![ResourceId::Fpga("u280".into())],
+            inhibit: true,
         });
         state
     }
@@ -1239,6 +1240,7 @@ mod duplicate_tests {
             user: crate::util::get_username(unsafe { libc::getuid() }),
             comment: String::new(),
             resources: ResourceId::parse_list("v80"),
+            inhibit: true,
         }];
         assert!(wanted(&state).is_empty());
     }

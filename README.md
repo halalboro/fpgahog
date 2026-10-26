@@ -25,13 +25,13 @@ Commands:
 Anything claimable is a *resource*: `host` is the whole machine, every other name is an FPGA.
 
 ```bash
-sudo fpgahog claim u280 4h running perf tests
-sudo fpgahog claim host 15min --exclusive
-sudo fpgahog claim host,u280 2h
-sudo fpgahog release u280
-sudo fpgahog release
-sudo fpgahog hog
-fpgahog check u280 || exit 1
+sudo fpgahog claim board-a 4h running perf tests  # one board
+sudo fpgahog claim host 15min --exclusive         # the machine
+sudo fpgahog claim host,board-a 2h                # both at once
+sudo fpgahog release board-a                      # give one back
+sudo fpgahog release                              # give back your hogs and exclusive claims
+sudo fpgahog hog                                  # lock ssh, timers and every board
+fpgahog check board-a || exit 1                   # in a script, before touching a board
 ```
 
 Claims on different boards never collide, so two people can use two cards at once. FPGA claims
@@ -45,29 +45,31 @@ sudo fpgahog discover --write
 ```
 
 This scans PCI and USB, registering boards under placeholder names (`fpga0`, `fpga1`, …) and
-assigning each one the JTAG cable whose product name matches its alias. Then edit
+assigning each one the JTAG cable whose USB product name contains its alias. Then edit
 `settings.fpgas` in `/var/lib/fpgahog/fpgahog.json` to give the boards real names and check
 what was guessed:
 
 ```json
-{ "alias": "u280", "bdf": "0000:c1:00.0", "pci_id": "10ee:903f",
-  "devices": ["/dev/coyote_ultrascale_plus_fpga_0_reconfig",
-              "/dev/coyote_ultrascale_plus_fpga_0_v0"],
-  "cables": ["217702174005"] }
+{ "alias": "board-a", "bdf": "0000:01:00.0", "pci_id": "10ee:0000",
+  "devices": ["/dev/myfpga0_ctrl", "/dev/myfpga0_data"],
+  "cables":  ["0123456789AB"] }
 ```
 
-A human has to check `devices`: a node named `coyote_fpga_0` carries an enumeration index, not
-a PCI address, so when two cards share a driver nothing says which node is which. `discover`
-fills the list only when one board uses that driver. Re-run it after a driver change; it
+`alias` is the name you claim the board by, `devices` the character devices that give access
+to it, and `cables` the USB serials of its JTAG cables.
+
+A human has to check `devices`: a node named `myfpga0` carries an enumeration index, not a PCI
+address, so when two cards share a driver nothing says which node belongs to which slot.
+`discover` fills the list only when one board uses that driver. Re-run it after a driver change; it
 replaces a list whose nodes have all disappeared, and reports one that is only partly stale.
 `list` marks nodes `(MISSING)` and shows each cable's state.
 
 ## Non-expiring and deployment reservations
 
-Use `sudo fpgahog claim v80 never` for an exclusive claim that lasts until
-`sudo fpgahog release v80`. Timed claims such as `claim v80 4h` remain supported.
-Non-expiring claims still receive periodic enforcement checks. State version 4
-represents them with `timeout: null`; existing timed state migrates on write.
+Use `sudo fpgahog claim board-a never` for an exclusive claim that lasts until
+`sudo fpgahog release board-a`. Timed claims such as `claim board-a 4h` remain supported.
+Non-expiring claims still receive periodic enforcement checks. The statefile
+represents them with `timeout: null`; older state migrates on write.
 Do not run older binaries against the migrated state.
 
 Deployment tools can use `reservation acquire --bdf <BDF> --token <UUID>
@@ -99,6 +101,26 @@ than silently accepting an advisory reservation.
 If a lock cannot be applied the claim is still recorded, and `status` says `ENFORCEMENT FAILED`
 rather than implying protection that is not there.
 
+## Holding off reboots
+
+While anyone holds a claim, fpgahog keeps a logind inhibitor on `shutdown` and `sleep`, so a
+colleague who types `sudo reboot` is told who is using the host instead of taking it down.
+Pass `claim --no-inhibit` to skip it for one claim.
+
+It is deliberately narrow, because systemd ignores a block inhibitor in exactly the cases
+where ignoring it is right:
+
+- **Unattended updates are unaffected.** `systemctl` skips the inhibitor check when it is not
+  talking to a terminal, and skips it for any *scheduled* shutdown (`shutdown -r +1440`),
+  which is how an auto-update reboots a host.
+- **It is overridable**: `systemctl reboot -i` goes through, as do `shutdown -r now` and
+  `reboot -f`.
+
+The lock is a file descriptor, so it needs a live process: fpgahog parks one in a transient
+`fpgahog-inhibit.service`, visible in `systemd-inhibit --list`. The same 5-minute re-check
+that re-applies the device locks restarts it if it is ever killed, and the last `release`
+stops it.
+
 ### Handles that are already open
 
 Permissions do not revoke an open file, so a claim **refuses** when someone else holds a board
@@ -112,6 +134,7 @@ their process closes them.
 - **A driver reload leaves a board open** until the next 5-minute pass.
 - **After a reboot** cables are unlocked until the first fpgahog run, since the udev rule lives
   in `/run`.
+- **A killed inhibitor leaves a window** until the next 5-minute pass.
 - **One host at a time**: state is host-local, so run fpgahog on the machine you want.
 
 ## hosthog compatibility
@@ -130,13 +153,16 @@ undoes a hog whose claim is gone.
 Needs `at` for claims to expire on time.
 
 ```bash
-just install
+just install   # builds the nix package and pins it at /var/lib/fpgahog/pkg as a GC root
 ln -s /var/lib/fpgahog/pkg/bin/fpgahog ~/.local/bin/fpgahog
 ```
 
+Link the binary, not the directory: the package also provides a `hosthog` that would shadow an
+installed one.
+
 The flake package targets Linux (`x86_64-linux` and `aarch64-linux`). It installs both
-`fpgahog` and the compatibility `hosthog` name. Runtime utilities (`who`, `wall`, and `at`) are
-bundled in the Nix wrapper. The host still needs a configured `atd` service for claim expiry
+`fpgahog` and the compatibility `hosthog` name. Runtime utilities (`who`, `wall`, `logger` and
+`at`) are bundled in the Nix wrapper. The host still needs a configured `atd` service for claim expiry
 and lock re-checks; otherwise expiry cleanup is not guaranteed. The scheduled command uses the
 installed pinned binary, so repository rebuilds cannot strand a claim. `cargo install --path .`
 works too, but jobs may call a build output; fpgahog warns when that is the case.

@@ -11,6 +11,7 @@ mod claims;
 mod util;
 mod systemd_units;
 mod reservation;
+mod inhibit;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -54,6 +55,10 @@ pub struct ClaimCommand {
     /// Claim even when the board is in use or cannot be enforced.
     #[arg(short, long)]
     pub force: bool,
+    /// Let the host reboot or suspend while this claim lasts. By default a claim refuses an
+    /// interactive `reboot`; scheduled and unattended ones are never affected either way.
+    #[arg(long)]
+    pub no_inhibit: bool,
 }
 
 
@@ -143,6 +148,11 @@ enum Commands {
         #[command(subcommand)]
         action: reservation::Action,
     },
+    #[command(hide(true))]
+    /// Hold a logind inhibitor until stopped. fpgahog starts this itself, in a transient unit.
+    InhibitHold {
+        why: String,
+    },
     // Internal command used to trigger updating the list of claims and hogs
     Maintenance {},
 }
@@ -152,6 +162,7 @@ enum Commands {
 fn needs_root(command: &Commands) -> bool {
     match command {
         Commands::Reservation { .. }
+        | Commands::InhibitHold { .. }
         | Commands::Claim { .. }
         | Commands::Release { .. }
         | Commands::Hog { .. }
@@ -346,6 +357,12 @@ fn show_status(_cmd: StatusCommand, state: &diskstate::DiskState) {
         })
         .collect();
     print_table(&["Remaining", "User", "Resources", "Comment"], &rows);
+
+    if inhibit::reason(state, now).is_some() {
+        println!("");
+        println!("While these claims last, an interactive reboot or suspend is refused.");
+        println!("Unattended and scheduled ones still go through, as does `systemctl reboot -i`.");
+    }
 }
 
 fn do_list(state: &diskstate::DiskState) {
@@ -569,6 +586,16 @@ fn main() {
             );
             std::process::exit(1);
         }
+    }
+
+    // The holder parks for as long as the claims last, so it must never reach the statefile
+    // lock below: every other fpgahog command would queue behind it until the claim expired.
+    if let Some(Commands::InhibitHold { why }) = &cli.command {
+        if let Err(err) = inhibit::hold(why) {
+            eprintln!("{}", err);
+            std::process::exit(1);
+        }
+        return;
     }
 
     // Commands run one at a time as root; see diskstate::lock. Readers take no lock, because

@@ -87,7 +87,6 @@ pub fn get_uid(name: &str) -> Option<u32> {
     return Some(unsafe { (*passwd).pw_uid });
 }
 
-/// Where `just install` pins fpgahog: host-local, stable across rebuilds, safe from GC.
 pub fn get_gid(name: &str) -> Option<u32> {
     let cname = std::ffi::CString::new(name).ok()?;
     let group = unsafe { libc::getgrnam(cname.as_ptr()) };
@@ -97,6 +96,7 @@ pub fn get_gid(name: &str) -> Option<u32> {
     return Some(unsafe { (*group).gr_gid });
 }
 
+/// Where `just install` pins fpgahog: host-local, stable across rebuilds, safe from GC.
 pub fn installed_binary() -> std::path::PathBuf {
     Path::new(STATE_PATH).join("pkg/bin/fpgahog")
 }
@@ -114,26 +114,76 @@ pub fn command_for_later(installed: &Path, running: &Path) -> std::path::PathBuf
 
 pub fn prog_for_later() -> String {
     let installed = installed_binary();
-    // An older installed helper cannot read newer state, even if its path is stable.
-    let compatible = std::process::Command::new(&installed).arg("--version").output()
-        .is_ok_and(|out| out.status.success()
-            && String::from_utf8_lossy(&out.stdout).split_whitespace().last() == Some(env!("CARGO_PKG_VERSION")));
-    if compatible {
-        command_for_later(&installed, Path::new(&prog())).to_string_lossy().into_owned()
-    } else {
-        prog()
+    let running = prog();
+    if !installed.is_file() {
+        return running;
+    }
+    // Only an *older* install is skipped: it cannot read the statefile this version writes.
+    // A newer one reads it fine, and preferring it keeps the stable path. Every rejection is
+    // announced, because the binary we fall back to is exactly the one that may not last.
+    match installed_version(&installed) {
+        Some(version) if !is_older(&version, env!("CARGO_PKG_VERSION")) => {
+            command_for_later(&installed, Path::new(&running)).to_string_lossy().into_owned()
+        }
+        Some(version) => {
+            eprintln!(
+                "WARN: the pinned install at {} is fpgahog {}, older than this {}, so it cannot read the state this writes. Falling back to {}; run `just install`.",
+                installed.display(), version, env!("CARGO_PKG_VERSION"), running
+            );
+            running
+        }
+        None => {
+            eprintln!(
+                "WARN: {} would not report a version, so it is not trusted to run scheduled work. Falling back to {}; run `just install`.",
+                installed.display(), running
+            );
+            running
+        }
     }
 }
 
-/// Whether `path` sits in a cargo build directory.
-pub fn is_build_output(path: &Path) -> bool {
-    let parts: Vec<String> = path
-        .components()
-        .map(|part| part.as_os_str().to_string_lossy().into_owned())
-        .collect();
-    parts
-        .windows(2)
-        .any(|pair| pair[0] == "target" && (pair[1] == "release" || pair[1] == "debug"))
+/// What the installed copy calls itself. It is asked rather than compared by path, because
+/// `just install` replaces a symlink, not the file behind it.
+fn installed_version(installed: &Path) -> Option<String> {
+    let output = std::process::Command::new(installed).arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .last()
+        .map(str::to_string)
+}
+
+/// Dotted versions compared numerically, so 0.10.0 is not older than 0.9.0.
+fn is_older(version: &str, than: &str) -> bool {
+    fn parts(version: &str) -> Vec<u64> {
+        version
+            .split('.')
+            .map(|part| part.trim_matches(|c: char| !c.is_ascii_digit()).parse().unwrap_or(0))
+            .collect()
+    }
+    parts(version) < parts(than)
+}
+
+/// Logger candidates for the scheduled job, by absolute path and most specific first.
+const LOGGER_PATHS: [&str; 3] = [
+    "/run/current-system/sw/bin/logger",
+    "/usr/bin/logger",
+    "/bin/logger",
+];
+
+/// The redirection a scheduled `maintenance` run appends to its command line, so `at` does not
+/// mail root every five minutes. Falls back to a file where the host has no `logger`.
+pub fn maintenance_sink() -> String {
+    maintenance_sink_from(&LOGGER_PATHS, STATE_PATH)
+}
+
+fn maintenance_sink_from(loggers: &[&str], state_path: &str) -> String {
+    match loggers.iter().find(|path| Path::new(path).is_file()) {
+        Some(logger) => format!("2>&1 | {} -t fpgahog", logger),
+        None => format!(">> {}/maintenance.log 2>&1", state_path),
+    }
 }
 
 #[cfg(test)]
@@ -199,10 +249,32 @@ mod later_tests {
     }
 
     #[test]
-    fn cargo_build_outputs_are_recognised() {
-        assert!(is_build_output(Path::new("/scratch/someone/fpgahog/target/release/fpgahog")));
-        assert!(is_build_output(Path::new("/scratch/someone/fpgahog/target/debug/fpgahog")));
-        assert!(!is_build_output(Path::new("/var/lib/fpgahog/pkg/bin/fpgahog")));
-        assert!(!is_build_output(Path::new("/nix/store/abc-fpgahog/bin/fpgahog")));
+    fn versions_are_compared_numerically() {
+        assert!(is_older("0.4.0", "0.5.0"));
+        assert!(!is_older("0.5.0", "0.5.0"));
+        assert!(!is_older("0.5.1", "0.5.0"));
+        // A newer install is kept, so the ordering must not be lexicographic.
+        assert!(!is_older("0.10.0", "0.9.0"));
+        assert!(is_older("0.9.0", "0.10.0"));
+    }
+
+    #[test]
+    fn the_scheduled_job_names_its_logger_absolutely() {
+        let dir = std::env::temp_dir().join("fpgahog-sink-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let logger = dir.join("logger");
+        std::fs::write(&logger, "").unwrap();
+        let found = maintenance_sink_from(&[logger.to_str().unwrap()], "/var/lib/fpgahog");
+        assert_eq!(found, format!("2>&1 | {} -t fpgahog", logger.display()));
+        assert!(!found.contains("PATH"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn without_a_logger_the_job_appends_to_a_file() {
+        assert_eq!(
+            maintenance_sink_from(&["/nonexistent/logger"], "/var/lib/fpgahog"),
+            ">> /var/lib/fpgahog/maintenance.log 2>&1"
+        );
     }
 }
